@@ -1,9 +1,56 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+
+export struct gamedata {
+    name: string,
+    publisher: string,
+    icon: image,
+}
 
 export component AppWindow inherits Window {
-    VerticalBox {
-        Text {
-            text: "Hello World";
+    width: 700px;
+    height: 450px;
+
+    in property <[gamedata]> games;
+    in property <image> selected-banner;
+    callback game-selected(int);
+    title: "Rewind Launcher";
+    HorizontalBox {
+        // Left: List of all loaded game ZIPs
+        ListView {
+            width: 300px;
+            for game[idx] in root.games: TouchArea {
+                height: 60px;
+                clicked => { root.game-selected(idx); }
+
+                HorizontalBox {
+                    Image {
+                        source: game.icon;
+                        width: 44px;
+                        height: 44px;
+                        image-fit: contain;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: game.name;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: game.publisher;
+                            color: #888888;
+                            font-size: 12px;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right: On-demand image loaded from the clicked game's ZIP
+        VerticalBox {
+            Image {
+                source: root.selected-banner;
+                image-fit: contain;
+            }
         }
     }
 }
