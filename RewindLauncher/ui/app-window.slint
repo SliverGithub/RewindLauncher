@@ -1,55 +1,151 @@
-import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, ListView, Button } from "std-widgets.slint";
 
 export struct gamedata {
     name: string,
     publisher: string,
     icon: image,
+    script: string
 }
 
 export component AppWindow inherits Window {
     width: 700px;
     height: 450px;
+    title: "Rewind Launcher";
 
     in property <[gamedata]> games;
-    in property <image> selected-banner;
+    in-out property <bool> show-details: false;
+    in-out property <int> selected-index: -1;
+
     callback game-selected(int);
-    title: "Rewind Launcher";
-    HorizontalBox {
-        // Left: List of all loaded game ZIPs
+    callback patch-clicked(int);
+
+    // Page 1: Game list (kept alive when hidden)
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        visible: !root.show-details;
+
         ListView {
-            width: 300px;
-            for game[idx] in root.games: TouchArea {
+            width: 100%;
+            height: 100%;
+
+            for game[idx] in root.games: Rectangle {
                 height: 60px;
-                clicked => { root.game-selected(idx); }
 
                 HorizontalBox {
-                    Image {
-                        source: game.icon;
-                        width: 44px;
-                        height: 44px;
-                        image-fit: contain;
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: game.name;
-                            font-weight: 700;
+                    alignment: stretch;
+
+                    // Clickable card area (excludes the Patch! button)
+                    TouchArea {
+                        horizontal-stretch: 1;
+                        clicked => {
+                            root.selected-index = idx;
+                            root.show-details = true;
+                            root.game-selected(idx);
                         }
-                        Text {
-                            text: game.publisher;
-                            color: #888888;
-                            font-size: 12px;
+
+                        HorizontalBox {
+                            alignment: start;
+
+                            Image {
+                                source: game.icon;
+                                width: 44px;
+                                height: 44px;
+                                image-fit: contain;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+
+                                Text {
+                                    text: game.name;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: game.publisher;
+                                    color: #888888;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: "Patch!";
+                        clicked => {
+                            root.patch-clicked(idx);
                         }
                     }
                 }
             }
         }
+    }
 
-        // Right: On-demand image loaded from the clicked game's ZIP
+    // Page 2: Selected game full info
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        visible: root.show-details && root.selected-index >= 0 && root.selected-index < root.games.length;
+
         VerticalBox {
-            Image {
-                source: root.selected-banner;
-                image-fit: contain;
+            padding: 20px;
+            spacing: 12px;
+
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
+
+                Button {
+                    text: "Back";
+                    clicked => {
+                        root.show-details = false;
+                    }
+                }
+
+                Image {
+                    source: root.games[root.selected-index].icon;
+                    width: 64px;
+                    height: 64px;
+                    image-fit: contain;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Text {
+                        text: root.games[root.selected-index].name;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: root.games[root.selected-index].publisher;
+                        color: #888888;
+                        font-size: 14px;
+                    }
+                }
+            }
+
+            Text {
+                text: "Script:";
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.games[root.selected-index].script;
+                wrap: word-wrap;
+            }
+
+            HorizontalBox {
+                alignment: start;
+
+                Button {
+                    text: "Patch!";
+                    clicked => {
+                        root.patch-clicked(root.selected-index);
+                    }
+                }
             }
         }
     }
