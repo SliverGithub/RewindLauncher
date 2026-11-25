@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs::File,
     io::Read,
@@ -9,37 +10,78 @@ use std::{
 };
 
 use mlua::Lua;
+use serde::Deserialize;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use walkdir::WalkDir;
 use zip::ZipArchive;
 
 slint::include_modules!();
 
-/// Reads a flat `key: value` scalar out of meta.yaml
-/// shortcut: no YAML parsing (no nesting, no multi-line values), add a parser if meta.yaml grows
-fn yaml_value(yaml: &str, key: &str) -> Option<String> {
-    yaml.lines()
-        .find_map(|line| {
-            let (k, v) = line.trim().split_once(':')?;
-            (k.trim() == key).then(|| v.trim().trim_matches(&['"', '\''][..]).to_string())
-        })
-        .filter(|v| !v.is_empty())
+#[derive(Default, Deserialize)]
+struct Meta {
+    name: Option<String>,
+    publisher: Option<String>,
+    #[serde(default)]
+    modlist: Vec<ModItem>,
+}
+
+/// One mod list entry: a plain mod, or a named group of nested mods.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModItem {
+    Mod(String),
+    Group(BTreeMap<String, Vec<ModItem>>),
+}
+
+/// Flattens the tree into rows, keeping each row's indent depth.
+fn modlist_rows(items: &[ModItem]) -> Vec<modentry> {
+    fn walk(items: &[ModItem], depth: i32, out: &mut Vec<modentry>) {
+        for item in items {
+            match item {
+                ModItem::Mod(name) => out.push(modentry {
+                    name: name.as_str().into(),
+                    depth,
+                }),
+                ModItem::Group(group) => {
+                    for (name, mods) in group {
+                        out.push(modentry {
+                            name: name.as_str().into(),
+                            depth,
+                        });
+                        walk(mods, depth + 1, out);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(items, 0, &mut out);
+    out
 }
 
 /// Opens one game zip, reads `meta.yaml` and its first `icon/*.jpg`
 fn load_game(zip_path: &Path) -> Option<gamedata> {
     let mut zip = ZipArchive::new(File::open(zip_path).ok()?).ok()?;
 
-    let mut meta = String::new();
+    let mut meta_yaml = String::new();
     zip.by_name("meta.yaml")
         .ok()?
-        .read_to_string(&mut meta)
+        .read_to_string(&mut meta_yaml)
         .ok()?;
 
+    let meta: Meta = rust_yaml::from_str(&meta_yaml).unwrap_or_default();
+    let modlist = if meta.modlist.is_empty() {
+        vec![modentry {
+            name: "This mod package has no mod list in it's meta.yaml file".into(),
+            depth: 0,
+        }]
+    } else {
+        modlist_rows(&meta.modlist)
+    };
     let name =
-        yaml_value(&meta, "name").or_else(|| Some(zip_path.file_stem()?.to_str()?.to_string()))?;
-    let publisher = yaml_value(&meta, "publisher").unwrap_or_else(|| "Unknown Publisher".into());
-
+        meta.name.or_else(|| Some(zip_path.file_stem()?.to_str()?.to_string()))?;
+    let publisher = meta.publisher.unwrap_or_else(|| "Unknown Publisher".into());
     let script = zip
         .file_names()
         .filter_map(Result::ok)
@@ -64,11 +106,13 @@ fn load_game(zip_path: &Path) -> Option<gamedata> {
             ))
         })
         .unwrap_or_default();
+
     Some(gamedata {
         name: name.into(),
         publisher: publisher.into(),
         icon,
         script: script.into(),
+        modlist: ModelRc::from(Rc::new(VecModel::from(modlist))),
     })
 }
 
@@ -153,4 +197,61 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     ui.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(meta: &Meta) -> Vec<(String, i32)> {
+        modlist_rows(&meta.modlist)
+            .into_iter()
+            .map(|row| (row.name.to_string(), row.depth))
+            .collect()
+    }
+
+    #[test]
+    fn example_package() {
+        let meta: Meta = rust_yaml::from_str(include_str!("../../ExamplePackage/meta.yaml")).unwrap();
+        assert_eq!(meta.name.as_deref(), Some("Not GTA6"));
+        assert_eq!(
+            rows(&meta),
+            [
+                ("some modloader idk".to_string(), 0),
+                ("Graphics".to_string(), 0),
+                ("some graphics patch".to_string(), 1),
+                ("some texture pack".to_string(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn three_levels() {
+        let meta: Meta = rust_yaml::from_str(
+            "modlist:\n  - Graphics:\n      - Textures:\n          - hd pack\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&meta),
+            [
+                ("Graphics".to_string(), 0),
+                ("Textures".to_string(), 1),
+                ("hd pack".to_string(), 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_modlist() {
+        let meta: Meta =
+            rust_yaml::from_str("modlist:\n  - loader\n  - Graphics:\n      - patch\n").unwrap();
+        assert_eq!(
+            rows(&meta),
+            [
+                ("loader".to_string(), 0),
+                ("Graphics".to_string(), 0),
+                ("patch".to_string(), 1)
+            ]
+        );
+    }
 }

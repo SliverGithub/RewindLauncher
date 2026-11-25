@@ -1,15 +1,19 @@
-import { HorizontalBox, VerticalBox, ListView, Button } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, ListView, Button, ScrollView } from "std-widgets.slint";
+
+export struct modentry {
+    name: string,
+    depth: int,
+}
 
 export struct gamedata {
     name: string,
     publisher: string,
     icon: image,
-    script: string
+    script: string,
+    modlist: [modentry],
 }
 
 export component AppWindow inherits Window {
-    width: 700px;
-    height: 450px;
     title: "Rewind Launcher";
 
     in property <[gamedata]> games;
@@ -31,120 +35,133 @@ export component AppWindow inherits Window {
 
             for game[idx] in root.games: Rectangle {
                 height: 60px;
-
-                HorizontalBox {
-                    alignment: stretch;
-
-                    // Clickable card area (excludes the Patch! button)
                     TouchArea {
                         horizontal-stretch: 1;
                         clicked => {
                             root.selected-index = idx;
                             root.show-details = true;
-                            root.game-selected(idx);
-                        }
+                            root.game-selected(idx);}
 
-                        HorizontalBox {
-                            alignment: start;
+                            HorizontalBox {
+                                alignment: stretch;
 
-                            Image {
-                                source: game.icon;
-                                width: 44px;
-                                height: 44px;
-                                image-fit: contain;
-                            }
+                                HorizontalBox {
+                                    alignment: start;
 
-                            VerticalLayout {
-                                alignment: center;
+                                    Image {
+                                        source: game.icon;
+                                        width: 44px;
+                                        height: 44px;
+                                        image-fit: contain;
+                                    }
 
-                                Text {
-                                    text: game.name;
-                                    font-weight: 700;
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                    Text {
+                                        text: game.name;
+                                        font-weight: 700;
+                                    }
+
+                                    Text {
+                                        text: game.publisher;
+                                        color: #888888;
+                                        font-size: 12px;
+                                    }
                                 }
-
-                                Text {
-                                    text: game.publisher;
-                                    color: #888888;
-                                    font-size: 12px;
-                                }
+                                Button {
+                                        text: "Patch!";
+                                        clicked => {
+                                            root.patch-clicked(idx);
+                                        }
+                                    }
                             }
-                        }
-                    }
-
-                    Button {
-                        text: "Patch!";
-                        clicked => {
-                            root.patch-clicked(idx);
                         }
                     }
                 }
             }
         }
-    }
 
     // Page 2: Selected game full info
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        visible: root.show-details && root.selected-index >= 0 && root.selected-index < root.games.length;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            visible: root.show-details && root.selected-index >= 0 && root.selected-index < root.games.length;
 
-        VerticalBox {
-            padding: 20px;
-            spacing: 12px;
-
-            HorizontalBox {
-                alignment: start;
+            VerticalBox {
+                padding: 20px;
                 spacing: 12px;
 
-                Button {
-                    text: "Back";
-                    clicked => {
-                        root.show-details = false;
+                HorizontalBox {
+                    alignment: start;
+                    spacing: 12px;
+
+                    Button {
+                        text: "Back";
+                            clicked => {
+                            root.show-details = false;
+                            }
+                    }
+
+                    Image {
+                        source: root.games[root.selected-index].icon;
+                        width: 64px;
+                        height: 64px;
+                        image-fit: contain;
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        Text {
+                            text: root.games[root.selected-index].name;
+                            font-size: 20px;
+                            font-weight: 700;
+                        }
+
+                        Text {
+                            text: root.games[root.selected-index].publisher;
+                            color: #888888;
+                            font-size: 14px;
+                        }
                     }
                 }
 
-                Image {
-                    source: root.games[root.selected-index].icon;
-                    width: 64px;
-                    height: 64px;
-                    image-fit: contain;
+                Text {
+                    text: "Included Mods:";
+                    font-weight: 700;
                 }
 
-                VerticalLayout {
-                    alignment: center;
+                ScrollView {
 
-                    Text {
-                        text: root.games[root.selected-index].name;
-                        font-size: 20px;
-                        font-weight: 700;
-                    }
+                    VerticalLayout {
+                        spacing: 0px;
 
-                    Text {
-                        text: root.games[root.selected-index].publisher;
-                        color: #888888;
-                        font-size: 14px;
+                        for entry in root.games[root.selected-index].modlist: HorizontalBox {
+                            alignment: start;
+                            spacing: 0px;
+
+                            Rectangle {
+                                width: entry.depth * 16px;
+                            }
+
+                            Text {
+                                text: "• " + entry.name;
+                                horizontal-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
-            }
 
-            Text {
-                text: "Script:";
-                font-weight: 700;
-            }
+                HorizontalBox {
+                    alignment: start;
 
-            Text {
-                text: root.games[root.selected-index].script;
-                wrap: word-wrap;
-            }
-
-            HorizontalBox {
-                alignment: start;
-
-                Button {
-                    text: "Patch!";
-                    clicked => {
-                        root.patch-clicked(root.selected-index);
-                    }
+                    Button {
+                        text: "Patch!";
+                        clicked => {
+                            root.patch-clicked(root.selected-index);
+                     }
                 }
             }
         }

@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 image = "0.25.10"
 mlua = { version = "0.12.3", features = ["lua54", "vendored"] }
+rust-yaml = { version = "1.1.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
 slint = "1.19.0"
 walkdir = "2.5.1"
 zip = "9.8.2"

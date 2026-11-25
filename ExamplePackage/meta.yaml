@@ -1,2 +1,7 @@
 name: Not GTA6
 publisher: Not Rockstar
+modlist:
+  - some modloader idk
+  - Graphics:
+      - some graphics patch
+      - some texture pack
