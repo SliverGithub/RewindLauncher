@@ -7,9 +7,14 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use mlua::Lua;
+use rfd::FileDialog;
 use serde::Deserialize;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use walkdir::WalkDir;
@@ -79,8 +84,9 @@ fn load_game(zip_path: &Path) -> Option<gamedata> {
     } else {
         modlist_rows(&meta.modlist)
     };
-    let name =
-        meta.name.or_else(|| Some(zip_path.file_stem()?.to_str()?.to_string()))?;
+    let name = meta
+        .name
+        .or_else(|| Some(zip_path.file_stem()?.to_str()?.to_string()))?;
     let publisher = meta.publisher.unwrap_or_else(|| "Unknown Publisher".into());
     let script = zip
         .file_names()
@@ -132,25 +138,38 @@ fn scan_folder(root: &Path) -> Vec<(PathBuf, gamedata)> {
 }
 
 /// `$XDG_DATA_HOME/Rewind` (default `~/.local/share/Rewind`), created if missing
-fn games_dir() -> std::io::Result<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
-        });
-    let dir = base.join("Rewind");
+fn games_dir() -> Result<PathBuf, std::io::Error> {
+    let dir = if std::env::consts::OS == "windows" {
+        let home = std::env::var_os("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE").unwrap_or_default();
+                let path = std::env::var_os("HOMEPATH").unwrap_or_default();
+                PathBuf::from(drive).join(path)
+            });
+        home.join("rewind")
+    } else {
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = std::env::var_os("HOME").unwrap_or_default();
+                PathBuf::from(home).join(".local/share")
+            });
+        data_home.join("rewind")
+    };
+
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
-
 /// Reads `script.lua` out of the package and runs it with a `game` table
 /// (name, publisher, package path) available to the script.
-/// shortcut: runs on the UI thread, move to a worker if scripts get slow
+/// shortcut: opens the folder dialog from a worker thread; macOS needs it on the main thread
 fn execute_script(
     zip_path: &Path,
     script_name: &str,
-    game: &gamedata,
+    game_name: &str,
 ) -> Result<(), Box<dyn Error>> {
     if script_name.is_empty() {
         return Err(format!("{} has no script.lua", zip_path.display()).into());
@@ -162,9 +181,31 @@ fn execute_script(
 
     let lua = Lua::new();
     let game_table = lua.create_table()?;
-    game_table.set("name", game.name.as_str())?;
-    game_table.set("publisher", game.publisher.as_str())?;
+    let gamepath = FileDialog::new()
+        .set_title(format!("Pick the game folder for {game_name}"))
+        .pick_folder();
     game_table.set("package", zip_path.to_string_lossy().as_ref())?;
+    game_table.set("game_path", gamepath)?;
+    let pkg_path = zip_path.to_path_buf();
+    let read_file_fn = lua.create_function(move |lua, entry_name: String| {
+        let mut archive = match File::open(&pkg_path)
+            .and_then(|f| ZipArchive::new(f).map_err(std::io::Error::other))
+        {
+            Ok(a) => a,
+            Err(e) => return Ok((mlua::Value::Nil, Some(e.to_string()))),
+        };
+        let mut entry = match archive.by_name(&entry_name) {
+            Ok(entry) => entry,
+            Err(e) => return Ok((mlua::Value::Nil, Some(e.to_string()))),
+        };
+        let mut buf = Vec::new();
+        if let Err(e) = entry.read_to_end(&mut buf) {
+            return Ok((mlua::Value::Nil, Some(e.to_string())));
+        }
+        let bytes = lua.create_string(&buf)?;
+        Ok((mlua::Value::String(bytes), None))
+    })?;
+    game_table.set("read_file", read_file_fn)?;
     lua.globals().set("game", game_table)?;
     lua.load(&source).set_name(script_name).exec()?;
     Ok(())
@@ -184,15 +225,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         found.into_iter().map(|(_, game)| game).collect::<Vec<_>>(),
     ));
     ui.set_games(ModelRc::from(games.clone()));
-
+    let busy = Arc::new(AtomicBool::new(false));
+    let ui_handle = ui.as_weak();
     ui.on_patch_clicked(move |idx| {
+        if busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let idx = idx as usize;
-        let (Some(game), Some(zip)) = (games.row_data(idx), sources.get(idx)) else {
+        let (Some(game), Some(zip)) = (games.row_data(idx), sources.get(idx).cloned()) else {
+            busy.store(false, Ordering::SeqCst);
             return;
         };
-        if let Err(e) = execute_script(zip, &game.script, &game) {
-            eprintln!("patch failed for {}: {e}", game.name);
+        let name = game.name.to_string();
+        let script = game.script.to_string();
+        if let Some(ui) = ui_handle.upgrade() {
+            ui.set_patching(true);
         }
+        let ui_handle = ui_handle.clone();
+        let busy = busy.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = execute_script(&zip, &script, &name) {
+                eprintln!("patch failed for {name}: {e}");
+            }
+            let _ = ui_handle.upgrade_in_event_loop(|ui| ui.set_patching(false));
+            busy.store(false, Ordering::SeqCst);
+        });
     });
 
     ui.run()?;
@@ -212,7 +269,8 @@ mod tests {
 
     #[test]
     fn example_package() {
-        let meta: Meta = rust_yaml::from_str(include_str!("../../ExamplePackage/meta.yaml")).unwrap();
+        let meta: Meta =
+            rust_yaml::from_str(include_str!("../../ExamplePackage/meta.yaml")).unwrap();
         assert_eq!(meta.name.as_deref(), Some("Not GTA6"));
         assert_eq!(
             rows(&meta),

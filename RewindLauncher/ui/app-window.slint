@@ -19,7 +19,7 @@ export component AppWindow inherits Window {
     in property <[gamedata]> games;
     in-out property <bool> show-details: false;
     in-out property <int> selected-index: -1;
-
+    in property <bool> patching: false;
     callback game-selected(int);
     callback patch-clicked(int);
 
@@ -35,52 +35,57 @@ export component AppWindow inherits Window {
 
             for game[idx] in root.games: Rectangle {
                 height: 60px;
+
+                HorizontalBox {
+                    alignment: stretch;
                     TouchArea {
                         horizontal-stretch: 1;
                         clicked => {
                             root.selected-index = idx;
                             root.show-details = true;
-                            root.game-selected(idx);}
+                            root.game-selected(idx);
+                        }
 
-                            HorizontalBox {
-                                alignment: stretch;
+                        HorizontalBox {
+                        HorizontalBox {
+                            alignment: start;
+                            Image {
+                                source: game.icon;
+                                width: 44px;
+                                height: 44px;
+                                image-fit: contain;
+                            }
 
-                                HorizontalBox {
-                                    alignment: start;
+                            VerticalLayout {
+                                alignment: center;
 
-                                    Image {
-                                        source: game.icon;
-                                        width: 44px;
-                                        height: 44px;
-                                        image-fit: contain;
-                                    }
-
-                                    VerticalLayout {
-                                        alignment: center;
-
-                                    Text {
-                                        text: game.name;
-                                        font-weight: 700;
-                                    }
-
-                                    Text {
-                                        text: game.publisher;
-                                        color: #888888;
-                                        font-size: 12px;
-                                    }
+                                Text {
+                                    text: game.name;
+                                    font-weight: 700;
                                 }
-                                Button {
-                                        text: "Patch!";
-                                        clicked => {
-                                            root.patch-clicked(idx);
-                                        }
-                                    }
+
+                                Text {
+                                    text: game.publisher;
+                                    color: #888888;
+                                    font-size: 12px;
+                                }
                             }
                         }
+                        Button {
+                            text: "Patch!";
+                            enabled: !patching;
+                            clicked => {
+                                root.patch-clicked(idx);
+                            }
+                        }
+
+                        }
                     }
+
                 }
             }
         }
+    }
 
     // Page 2: Selected game full info
         Rectangle {
@@ -159,6 +164,7 @@ export component AppWindow inherits Window {
 
                     Button {
                         text: "Patch!";
+                        enabled: !patching;
                         clicked => {
                             root.patch-clicked(root.selected-index);
                      }
