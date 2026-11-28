@@ -26,6 +26,7 @@ slint::include_modules!();
 struct Meta {
     name: Option<String>,
     publisher: Option<String>,
+    version: Option<i32>,
     #[serde(default)]
     modlist: Vec<ModItem>,
 }
@@ -94,6 +95,7 @@ fn load_game(zip_path: &Path) -> Option<gamedata> {
         .find(|n| n.eq_ignore_ascii_case("script.lua"))
         .map(|n| n.to_string())
         .unwrap_or_default();
+    let ver = meta.version.unwrap_or_else(|| 0.into());
 
     let icon_name = zip
         .file_names()
@@ -119,6 +121,7 @@ fn load_game(zip_path: &Path) -> Option<gamedata> {
         icon,
         script: script.into(),
         modlist: ModelRc::from(Rc::new(VecModel::from(modlist))),
+        version: ver.into(),
     })
 }
 

@@ -11,6 +11,7 @@ export struct gamedata {
     icon: image,
     script: string,
     modlist: [modentry],
+    version: int,
 }
 
 export component AppWindow inherits Window {
@@ -47,41 +48,41 @@ export component AppWindow inherits Window {
                         }
 
                         HorizontalBox {
-                        HorizontalBox {
-                            alignment: start;
-                            Image {
-                                source: game.icon;
-                                width: 44px;
-                                height: 44px;
-                                image-fit: contain;
-                            }
+                            HorizontalBox {
+                                alignment: start;
 
-                            VerticalLayout {
-                                alignment: center;
-
-                                Text {
-                                    text: game.name;
-                                    font-weight: 700;
+                                Image {
+                                    source: game.icon;
+                                    width: 44px;
+                                    height: 44px;
+                                    image-fit: contain;
                                 }
 
-                                Text {
-                                    text: game.publisher;
-                                    color: #888888;
-                                    font-size: 12px;
+                                VerticalBox {
+                                    alignment: center;
+
+                                    Text {
+                                        text: game.name;
+                                        font-weight: 700;
+                                    }
+
+                                    Text {
+                                        text: game.publisher + " - " + (game.version == 0 ? "Unknown Version" : "v" + game.version);
+                                        color: #888888;
+                                        font-size: 12px;
+                                    }
                                 }
                             }
-                        }
-                        Button {
-                            text: "Patch!";
-                            enabled: !patching;
-                            clicked => {
-                                root.patch-clicked(idx);
-                            }
-                        }
 
+                            Button {
+                                text: "Patch!";
+                                enabled: !patching;
+                                clicked => {
+                                    root.patch-clicked(idx);
+                                }
+                            }
                         }
                     }
-
                 }
             }
         }
@@ -115,7 +116,7 @@ export component AppWindow inherits Window {
                         image-fit: contain;
                     }
 
-                    VerticalLayout {
+                    VerticalBox {
                         alignment: center;
 
                         Text {
@@ -139,7 +140,7 @@ export component AppWindow inherits Window {
 
                 ScrollView {
 
-                    VerticalLayout {
+                    VerticalBox {
                         spacing: 0px;
 
                         for entry in root.games[root.selected-index].modlist: HorizontalBox {
