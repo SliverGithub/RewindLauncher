@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs::File,
-    io::{Cursor, Read},
+    io::Read,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -169,9 +169,6 @@ fn games_dir() -> Result<PathBuf, std::io::Error> {
     Ok(dir)
 }
 
-/// GitHub rejects repo files over 100MB, so no package can be bigger.
-const MAX_PACKAGE: u64 = 100 * 1024 * 1024;
-
 /// What a package's `update` URL serves: the current version and a link to its zip.
 #[derive(Deserialize)]
 struct UpdateInfo {
@@ -193,38 +190,70 @@ fn fetch_update(url: &str) -> Result<UpdateInfo, Box<dyn Error>> {
     Ok(rust_yaml::from_str(&body)?)
 }
 
-fn fetch_package(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+fn fetch_package(url: &str, part: &Path) -> Result<(), Box<dyn Error>> {
     let mut res = ureq::get(url).call()?;
-    Ok(res
-        .body_mut()
-        .with_config()
-        .limit(MAX_PACKAGE)
-        .read_to_vec()?)
+    let mut file = File::create(part)?;
+    std::io::copy(&mut res.body_mut().as_reader(), &mut file)?;
+    file.sync_all()?;
+    Ok(())
 }
 
-/// Version of a downloaded package, but only if it is a real package: a zip
+/// Version of a downloaded package file, but only if it is a real package: a zip
 /// whose `meta.yaml` parses, names `name` and carries a version. Anything else
 /// (error page, truncated download) must never be written.
-fn package_version(bytes: &[u8], name: &str) -> Option<i32> {
-    let mut zip = ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let mut yaml = String::new();
-    zip.by_name("meta.yaml").ok()?.read_to_string(&mut yaml).ok()?;
-    let meta: Meta = rust_yaml::from_str(&yaml).ok()?;
+fn package_version(zip_path: &Path, name: &str) -> Option<i32> {
+    let meta = read_meta(zip_path)?;
     if meta.name.as_deref() != Some(name) {
         return None;
     }
     meta.version
 }
 
-/// Swaps the zip in place, keeping the old file until the new one is in place.
-fn replace_zip(zip_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = zip_path.with_extension("zip.part");
-    std::fs::write(&tmp, bytes)?;
+/// Makes the renames durable. POSIX needs the directory synced; Windows has no
+/// directory handle, the rename is already journaled there.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) {}
+
+/// Swaps the downloaded `.part` in, keeping the old file until the new one is in place.
+fn replace_zip(zip_path: &Path, part: &Path) -> std::io::Result<()> {
     let old = zip_path.with_extension("zip.old");
+    let _ = std::fs::remove_file(&old);
     std::fs::rename(zip_path, &old)?;
-    std::fs::rename(&tmp, zip_path)?;
+    std::fs::rename(part, zip_path)?;
+    if let Some(dir) = zip_path.parent() {
+        sync_dir(dir);
+    }
     let _ = std::fs::remove_file(&old);
     Ok(())
+}
+
+/// Undoes a swap that a crash interrupted: a `.old` next to a missing zip goes
+/// back, one next to a live zip is just leftover litter.
+fn recover_packages(root: &Path) {
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        let file = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if !file.to_ascii_lowercase().ends_with(".zip.old") {
+            continue;
+        }
+        let zip = path.with_file_name(&file[..file.len() - 4]);
+        if zip.exists() {
+            let _ = std::fs::remove_file(path);
+        } else {
+            let _ = std::fs::rename(path, &zip);
+        }
+    }
 }
 
 /// Fetches each package's own update yaml and replaces the zip only when that
@@ -244,14 +273,14 @@ fn update_packages(sources: &[PathBuf]) -> Vec<(usize, PathBuf)> {
         if info.version <= version {
             continue;
         }
-        let Ok(bytes) = fetch_package(&info.package) else {
-            continue;
-        };
-        let Some(new) = package_version(&bytes, &name) else {
-            continue;
-        };
-        if new > version && replace_zip(path, &bytes).is_ok() {
+        let part = path.with_extension("zip.part");
+        let replaced = fetch_package(&info.package, &part).is_ok()
+            && package_version(&part, &name).is_some_and(|new| new > version)
+            && replace_zip(path, &part).is_ok();
+        if replaced {
             updated.push((row, path.clone()));
+        } else {
+            let _ = std::fs::remove_file(&part);
         }
     }
     updated
@@ -308,7 +337,9 @@ fn execute_script(
 fn main() -> Result<(), Box<dyn Error>> {
     let ui = AppWindow::new()?;
 
-    let found = scan_folder(&games_dir()?);
+    let dir = games_dir()?;
+    recover_packages(&dir);
+    let found = scan_folder(&dir);
     let sources = Rc::new(
         found
             .iter()
@@ -367,6 +398,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
 
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rewind-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn rows(meta: &Meta) -> Vec<(String, i32)> {
         modlist_rows(&meta.modlist)
             .into_iter()
@@ -408,8 +446,9 @@ mod tests {
 
     #[test]
     fn validity_guard() {
-        use std::io::Write;
+        use std::io::{Cursor, Write};
 
+        let dir = temp_dir("guard");
         let mut buf = Vec::new();
         {
             let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
@@ -418,10 +457,37 @@ mod tests {
             w.write_all(b"name: Game\nversion: 2\n").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(package_version(&buf, "Game"), Some(2));
-        assert_eq!(package_version(&buf, "Other"), None);
-        assert_eq!(package_version(b"<html>404</html>", "Game"), None);
-        assert_eq!(package_version(&buf[..buf.len() / 2], "Game"), None);
+        let path = dir.join("game.zip");
+        std::fs::write(&path, &buf).unwrap();
+        assert_eq!(package_version(&path, "Game"), Some(2));
+        assert_eq!(package_version(&path, "Other"), None);
+        std::fs::write(&path, b"<html>404</html>").unwrap();
+        assert_eq!(package_version(&path, "Game"), None);
+        std::fs::write(&path, &buf[..buf.len() / 2]).unwrap();
+        assert_eq!(package_version(&path, "Game"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovers_interrupted_swap() {
+        let dir = temp_dir("recover");
+        let zip = dir.join("game.zip");
+        let old = dir.join("game.zip.old");
+
+        // crash after the zip was renamed away: the old copy goes back
+        std::fs::write(&old, b"old").unwrap();
+        recover_packages(&dir);
+        assert_eq!(std::fs::read(&zip).unwrap(), b"old");
+        assert!(!old.exists());
+
+        // crash after the new zip landed: the leftover backup is dropped
+        std::fs::write(&zip, b"new").unwrap();
+        std::fs::write(&old, b"old").unwrap();
+        recover_packages(&dir);
+        assert_eq!(std::fs::read(&zip).unwrap(), b"new");
+        assert!(!old.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
