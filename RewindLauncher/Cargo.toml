@@ -13,6 +13,7 @@ rust-yaml = { version = "1.1.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 slint = "1.19.0"
 termlauncher = "0.4.0"
+ureq = "3"
 walkdir = "2.5.1"
 zip = "9.8.2"
 

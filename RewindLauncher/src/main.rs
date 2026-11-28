@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs::File,
-    io::Read,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -27,6 +27,8 @@ struct Meta {
     name: Option<String>,
     publisher: Option<String>,
     version: Option<i32>,
+    /// URL of a small yaml naming the current version and its zip.
+    update: Option<String>,
     #[serde(default)]
     modlist: Vec<ModItem>,
 }
@@ -166,6 +168,95 @@ fn games_dir() -> Result<PathBuf, std::io::Error> {
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
+
+/// GitHub rejects repo files over 100MB, so no package can be bigger.
+const MAX_PACKAGE: u64 = 100 * 1024 * 1024;
+
+/// What a package's `update` URL serves: the current version and a link to its zip.
+#[derive(Deserialize)]
+struct UpdateInfo {
+    version: i32,
+    /// Full URL of the zip.
+    package: String,
+}
+
+/// `meta.yaml` of an installed package, read without decoding its icon.
+fn read_meta(zip_path: &Path) -> Option<Meta> {
+    let mut zip = ZipArchive::new(File::open(zip_path).ok()?).ok()?;
+    let mut yaml = String::new();
+    zip.by_name("meta.yaml").ok()?.read_to_string(&mut yaml).ok()?;
+    rust_yaml::from_str(&yaml).ok()
+}
+
+fn fetch_update(url: &str) -> Result<UpdateInfo, Box<dyn Error>> {
+    let body = ureq::get(url).call()?.body_mut().read_to_string()?;
+    Ok(rust_yaml::from_str(&body)?)
+}
+
+fn fetch_package(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut res = ureq::get(url).call()?;
+    Ok(res
+        .body_mut()
+        .with_config()
+        .limit(MAX_PACKAGE)
+        .read_to_vec()?)
+}
+
+/// Version of a downloaded package, but only if it is a real package: a zip
+/// whose `meta.yaml` parses, names `name` and carries a version. Anything else
+/// (error page, truncated download) must never be written.
+fn package_version(bytes: &[u8], name: &str) -> Option<i32> {
+    let mut zip = ZipArchive::new(Cursor::new(bytes)).ok()?;
+    let mut yaml = String::new();
+    zip.by_name("meta.yaml").ok()?.read_to_string(&mut yaml).ok()?;
+    let meta: Meta = rust_yaml::from_str(&yaml).ok()?;
+    if meta.name.as_deref() != Some(name) {
+        return None;
+    }
+    meta.version
+}
+
+/// Swaps the zip in place, keeping the old file until the new one is in place.
+fn replace_zip(zip_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = zip_path.with_extension("zip.part");
+    std::fs::write(&tmp, bytes)?;
+    let old = zip_path.with_extension("zip.old");
+    std::fs::rename(zip_path, &old)?;
+    std::fs::rename(&tmp, zip_path)?;
+    let _ = std::fs::remove_file(&old);
+    Ok(())
+}
+
+/// Fetches each package's own update yaml and replaces the zip only when that
+/// yaml names a newer version. Returns the rows that changed.
+fn update_packages(sources: &[PathBuf]) -> Vec<(usize, PathBuf)> {
+    let mut updated = Vec::new();
+    for (row, path) in sources.iter().enumerate() {
+        let Some(meta) = read_meta(path) else {
+            continue;
+        };
+        let (Some(name), Some(version), Some(url)) = (meta.name, meta.version, meta.update) else {
+            continue;
+        };
+        let Ok(info) = fetch_update(&url) else {
+            continue;
+        };
+        if info.version <= version {
+            continue;
+        }
+        let Ok(bytes) = fetch_package(&info.package) else {
+            continue;
+        };
+        let Some(new) = package_version(&bytes, &name) else {
+            continue;
+        };
+        if new > version && replace_zip(path, &bytes).is_ok() {
+            updated.push((row, path.clone()));
+        }
+    }
+    updated
+}
+
 /// Reads `script.lua` out of the package and runs it with a `game` table
 /// (name, publisher, package path) available to the script.
 /// shortcut: opens the folder dialog from a worker thread; macOS needs it on the main thread
@@ -230,6 +321,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     ui.set_games(ModelRc::from(games.clone()));
     let busy = Arc::new(AtomicBool::new(false));
     let ui_handle = ui.as_weak();
+
+    let update_ui = ui_handle.clone();
+    let update_sources = (*sources).clone();
+    std::thread::spawn(move || {
+        for (row, path) in update_packages(&update_sources) {
+            let update_ui = update_ui.clone();
+            let _ = update_ui.upgrade_in_event_loop(move |ui| {
+                if let Some(game) = load_game(&path) {
+                    ui.get_games().set_row_data(row, game);
+                }
+            });
+        }
+    });
     ui.on_patch_clicked(move |idx| {
         if busy.swap(true, Ordering::SeqCst) {
             return;
@@ -273,7 +377,7 @@ mod tests {
     #[test]
     fn example_package() {
         let meta: Meta =
-            rust_yaml::from_str(include_str!("../../ExamplePackage/meta.yaml")).unwrap();
+            rust_yaml::from_str(include_str!("../../ExamplePackage/Package/meta.yaml")).unwrap();
         assert_eq!(meta.name.as_deref(), Some("Not GTA6"));
         assert_eq!(
             rows(&meta),
@@ -300,6 +404,24 @@ mod tests {
                 ("hd pack".to_string(), 2)
             ]
         );
+    }
+
+    #[test]
+    fn validity_guard() {
+        use std::io::Write;
+
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            w.start_file("meta.yaml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(b"name: Game\nversion: 2\n").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(package_version(&buf, "Game"), Some(2));
+        assert_eq!(package_version(&buf, "Other"), None);
+        assert_eq!(package_version(b"<html>404</html>", "Game"), None);
+        assert_eq!(package_version(&buf[..buf.len() / 2], "Game"), None);
     }
 
     #[test]
